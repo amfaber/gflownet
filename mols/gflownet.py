@@ -1,31 +1,31 @@
 import argparse
 from copy import copy, deepcopy
-from collections import defaultdict
-from datetime import timedelta
-import gc
+# from collections import defaultdict
+# from datetime import timedelta
+# import gc
 import gzip
 import os
-import os.path as osp
+# import os.path as osp
 import pickle
-import psutil
+# import psutil
 import pdb
-import subprocess
-import sys
+# import subprocess
+# import sys
 import threading
 import time
-import traceback
+# import traceback
 import warnings
 warnings.filterwarnings('ignore')
 import numpy as np
-import pandas as pd
-from rdkit import Chem
-from rdkit.Chem import QED
-from tqdm import tqdm
+# import pandas as pd
+# from rdkit import Chem
+# from rdkit.Chem import QED
+# from tqdm import tqdm
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
+# import torch.nn as nn
+# import torch.nn.functional as F
 from torch_geometric.data import Data, Batch
-import torch_geometric.nn as gnn
+# import torch_geometric.nn as gnn
 
 from mol_mdp_ext import MolMDPExtended, BlockMoleculeDataExtended
 import model_atom, model_block, model_fingerprint
@@ -364,8 +364,9 @@ _stop = [None]
 
 
 def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=True):
-    debug_no_threads = False
-    device = torch.device('cuda')
+    debug_no_threads = True
+    # device = torch.device('cuda')
+    device = torch.device('cpu')
 
     if num_steps is None:
         num_steps = args.num_iterations + 1
@@ -531,7 +532,8 @@ def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=
 
 def main(args):
     bpath = "data/blocks_PDB_105.json"
-    device = torch.device('cuda')
+    # device = torch.device('cuda')
+    device = torch.device('cpu')
 
     if args.floatX == 'float32':
         args.floatX = torch.float
@@ -554,7 +556,7 @@ def main(args):
 
 
 try:
-    from arrays import*
+    from arrays import *
 except:
     print("no arrays")
 

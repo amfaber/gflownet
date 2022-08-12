@@ -32,6 +32,7 @@ from torch.distributions.categorical import Categorical
 
 from utils import chem
 import ray
+ray.init()
 from mol_mdp_ext import MolMDPExtended, BlockMoleculeDataExtended
 
 import model_atom, model_block, model_fingerprint
