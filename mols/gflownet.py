@@ -81,7 +81,7 @@ class Dataset:
 
     def __init__(self, args, bpath, device, floatX=torch.double):
         self.test_split_rng = np.random.RandomState(142857)
-        self.train_rng = np.random.RandomState(int(time.time()))
+        self.train_rng = np.random.RandomState(0)
         self.train_mols = []
         self.test_mols = []
         self.train_mols_map = {}
@@ -366,7 +366,9 @@ _stop = [None]
 def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=True):
     debug_no_threads = True
     # device = torch.device('cuda')
-    device = torch.device('cpu')
+    # device = torch.device('cpu')
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(device)
 
     if num_steps is None:
         num_steps = args.num_iterations + 1
@@ -533,7 +535,8 @@ def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=
 def main(args):
     bpath = "data/blocks_PDB_105.json"
     # device = torch.device('cuda')
-    device = torch.device('cpu')
+    # device = torch.device('cpu')
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     if args.floatX == 'float32':
         args.floatX = torch.float
