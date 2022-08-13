@@ -16,7 +16,7 @@ import gzip
 import psutil
 import subprocess
 
-
+from watchpoints import watch
 import numpy as np
 import torch
 import torch.nn as nn
@@ -53,7 +53,9 @@ class MPNNet_v2(nn.Module):
 
         if self.version < 4:
             net = nn.Sequential(nn.Linear(4, 128), self.act, nn.Linear(128, dim * dim))
+            # net = nn.Sequential(nn.Linear(4, dim * dim))
             self.conv = NNConv(dim, dim, net, aggr='mean')
+            # watch(self.conv.nn)
         elif self.version == 4 or self.version == 6:
             self.conv = gnn.TransformerConv(dim, dim, edge_dim=4)
         else:
@@ -100,6 +102,10 @@ class MPNNet_v2(nn.Module):
 
         if self.version < 4:
             for i in range(self.num_conv_steps):
+
+                self.conv(
+                    out, data.edge_index, data.edge_attr
+                )
                 m = self.act(self.conv(out, data.edge_index, data.edge_attr))
                 m = F.dropout(m, training=do_dropout, p=self.dropout_rate)
                 out, h = self.gru(m.unsqueeze(0).contiguous(), h.contiguous())
@@ -118,7 +124,7 @@ class MPNNet_v2(nn.Module):
             # Index of the origin atom of each stem in the batch, we
             # need to adjust for the batch packing)
             stem_batch_idx = (
-                torch.tensor(data.__slices__['x'], device=out.device)[data.stems_batch]
+                torch.tensor(data._slice_dict['x'], device=out.device)[data.stems_batch]
                 + data.stems)
             stem_atom_out = out[stem_batch_idx]
             #if self.version >= 6:
@@ -180,14 +186,14 @@ class MolAC_GCN(nn.Module):
         Z = gnn.global_add_pool(stem_e, s.stems_batch).sum(1) + mol_e
         mol_lsm = torch.log(mol_e / Z)
         stem_lsm = torch.log(stem_e / Z[s.stems_batch, None])
-        stem_slices = torch.tensor(s.__slices__['stems'][:-1], dtype=torch.long, device=stem_lsm.device)
+        stem_slices = torch.tensor(s._slice_dict['stems'][:-1], dtype=torch.long, device=stem_lsm.device)
         return -(
             stem_lsm[stem_slices + a[:, 1]][
                 torch.arange(a.shape[0]), a[:, 0]] * (a[:, 0] >= 0)
             + mol_lsm * (a[:, 0] == -1))
 
     def index_output_by_action(self, s, stem_o, mol_o, a):
-        stem_slices = torch.tensor(s.__slices__['stems'][:-1], dtype=torch.long, device=stem_o.device)
+        stem_slices = torch.tensor(s._slice_dict['stems'][:-1], dtype=torch.long, device=stem_o.device)
         return (
             stem_o[stem_slices + a[:, 1]][
                 torch.arange(a.shape[0]), a[:, 0]] * (a[:, 0] >= 0)

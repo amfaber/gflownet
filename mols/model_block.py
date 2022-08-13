@@ -67,7 +67,7 @@ class GraphAgent(nn.Module):
         # adjust for the batch packing)
         if do_stems:
             stem_block_batch_idx = (
-                torch.tensor(graph_data.__slices__['x'], device=out.device)[graph_data.stems_batch]
+                torch.tensor(graph_data._slice_dict['x'], device=out.device)[graph_data.stems_batch]
                 + graph_data.stems[:, 0])
             if self.version == 'v1' or self.version == 'v4':
                 stem_out_cat = torch.cat([out[stem_block_batch_idx], graph_data.stemtypes], 1)
@@ -102,7 +102,7 @@ class GraphAgent(nn.Module):
         return -self.index_output_by_action(s, stem_lsm, mol_lsm, a)
 
     def index_output_by_action(self, s, stem_o, mol_o, a):
-        stem_slices = torch.tensor(s.__slices__['stems'][:-1], dtype=torch.long, device=stem_o.device)
+        stem_slices = torch.tensor(s._slice_dict['stems'][:-1], dtype=torch.long, device=stem_o.device)
         return (
             stem_o[stem_slices + a[:, 1]][
                 torch.arange(a.shape[0]), a[:, 0]] * (a[:, 0] >= 0)

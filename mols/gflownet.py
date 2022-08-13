@@ -352,7 +352,10 @@ class Proxy:
         self.mdp.post_init(device, eargs.repr_type)
         self.mdp.floatX = args.floatX
         self.proxy = make_model(eargs, self.mdp)
-        for a,b in zip(self.proxy.parameters(), params):
+        currparams = [p for p in self.proxy.parameters()]
+        out_of_place = currparams.pop(7)
+        currparams.insert(2, out_of_place)
+        for a,b in zip(currparams, params):
             a.data = torch.tensor(b, dtype=self.mdp.floatX)
         self.proxy.to(device)
 
@@ -537,6 +540,7 @@ def main(args):
     # device = torch.device('cuda')
     # device = torch.device('cpu')
     device = "cuda" if torch.cuda.is_available() else "cpu"
+
 
     if args.floatX == 'float32':
         args.floatX = torch.float
