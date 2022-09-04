@@ -16,7 +16,6 @@ import gzip
 import psutil
 import subprocess
 
-from watchpoints import watch
 import numpy as np
 import torch
 import torch.nn as nn
