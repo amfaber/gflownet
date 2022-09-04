@@ -4,28 +4,34 @@ from copy import copy, deepcopy
 # from datetime import timedelta
 # import gc
 import gzip
+import multiprocessing
 import os
 # import os.path as osp
 import pickle
 # import psutil
 import pdb
+import tempfile
 # import subprocess
 # import sys
 import threading
 import time
 # import traceback
 import warnings
+
+from commons.process_mols import get_rdkit_coords
 warnings.filterwarnings('ignore')
 import numpy as np
 # import pandas as pd
-# from rdkit import Chem
+from rdkit import Chem
 # from rdkit.Chem import QED
 # from tqdm import tqdm
+import equibind_reward
 import torch
 # import torch.nn as nn
 # import torch.nn.functional as F
 from torch_geometric.data import Data, Batch
 # import torch_geometric.nn as gnn
+from itertools import repeat
 
 from mol_mdp_ext import MolMDPExtended, BlockMoleculeDataExtended
 import model_atom, model_block, model_fingerprint
@@ -36,7 +42,7 @@ os.makedirs(tmp_dir, exist_ok=True)
 parser = argparse.ArgumentParser()
 
 parser.add_argument("--learning_rate", default=5e-4, help="Learning rate", type=float)
-parser.add_argument("--mbsize", default=4, help="Minibatch size", type=int)
+parser.add_argument("--mbsize", default=12, help="Minibatch size", type=int)
 parser.add_argument("--opt_beta", default=0.9, type=float)
 parser.add_argument("--opt_beta2", default=0.999, type=float)
 parser.add_argument("--opt_epsilon", default=1e-8, type=float)
@@ -70,9 +76,8 @@ parser.add_argument("--include_nblocks", default=False)
 parser.add_argument("--balanced_loss", default=True)
 # If True this basically implements Buesing et al's TreeSample Q,
 # samples uniformly from it though, no MTCS involved
+parser.add_argument("--reward_type", default="vs")
 parser.add_argument("--do_wrong_thing", default=False)
-
-
 
 
 
@@ -90,7 +95,7 @@ class Dataset:
         self.mdp.build_translation_table()
         self._device = device
         self.seen_molecules = set()
-        self.stop_event = threading.Event()
+        # self.stop_event = threading.Event()
         self.target_norm = [-8.6, 1.10]
         self.sampling_model = None
         self.sampling_model_prob = 0
@@ -150,10 +155,10 @@ class Dataset:
             m = parents[self.train_rng.randint(len(parents))]
         return samples
 
-    def set_sampling_model(self, model, proxy_reward, sample_prob=0.5):
+    def set_sampling_model(self, model, rewarder, sample_prob=0.5):
         self.sampling_model = model
         self.sampling_model_prob = sample_prob
-        self.proxy_reward = proxy_reward
+        self.rewarder = rewarder
 
     def _get_sample_model(self):
         m = BlockMoleculeDataExtended()
@@ -178,7 +183,8 @@ class Dataset:
             q = torch.cat([m_o.reshape(-1), s_o.reshape(-1)])
             trajectory_stats.append((q[action].item(), action, torch.logsumexp(q, 0).item()))
             if t >= self.min_blocks and action == 0:
-                r = self._get_reward(m)
+                # r = self._get_reward(m)
+                r = None
                 samples.append(((m,), ((-1,0),), r, m, 1))
                 break
             else:
@@ -190,7 +196,8 @@ class Dataset:
                     # can't add anything more to this mol so let's make it
                     # terminal. Note that this node's parent isn't just m,
                     # because this is a sink for all parent transitions
-                    r = self._get_reward(m)
+                    # r = self._get_reward(m)
+                    r = None
                     if self.do_wrong_thing:
                         samples.append(((m_old,), (action,), r, m, 1))
                     else:
@@ -206,11 +213,16 @@ class Dataset:
         qsa_p = self.sampling_model.index_output_by_action(
             p, qp[0], qp[1][:, 0],
             torch.tensor(samples[-1][1], device=self._device).long())
-        inflow = torch.logsumexp(qsa_p.flatten(), 0).item()
-        self.sampled_mols.append((r, m, trajectory_stats, inflow))
-        if self.replay_mode == 'online' or self.replay_mode == 'prioritized':
-            m.reward = r
-            self._add_mol_to_online(r, m, inflow)
+        # inflow = torch.logsumexp(qsa_p.flatten(), 0).item()
+        # self.sampled_mols.append((r, m, trajectory_stats, inflow))
+        # if self.replay_mode == 'online' or self.replay_mode == 'prioritized':
+        #     m.reward = r
+        #     self._add_mol_to_online(r, m, inflow)
+
+        # finalmol = samples[-1][3].mol
+        # finalmol = Chem.AddHs(finalmol)
+        # equibind_reward.get_rdkit_coords(finalmol)
+        # samples[-1][3]._mol = finalmol
         return samples
 
     def _add_mol_to_online(self, r, m, inflow):
@@ -225,24 +237,59 @@ class Dataset:
             if len(self.online_mols) > self.max_online_mols * 1.1:
                 self.online_mols = self.online_mols[-self.max_online_mols:]
 
+    def reward_in_batch(self, batch): ##WORKS INPLACE
+        sample_idxs = []
+        mdpmols = []
+        for i, sample in enumerate(batch):
+            if sample[2] is not None:
+                continue
+            sample_idxs.append(i)
+            mdpmols.append(sample[3])
+        rewards = self._get_rewards(mdpmols)
+        for idx, reward in zip(sample_idxs, rewards):
+            batch[idx] = (batch[idx][0], batch[idx][1], reward, batch[idx][3], batch[idx][4])
 
-    def _get_reward(self, m):
-        rdmol = m.mol
-        if rdmol is None:
-            return self.R_min
-        smi = m.smiles
-        if smi in self.train_mols_map:
-            return self.train_mols_map[smi].reward
-        return self.r2r(normscore=self.proxy_reward(m))
+    # def _get_reward(self, m):
+    #     rdmol = m.mol
+    #     if rdmol is None:
+    #         return self.R_min
+    #     smi = m.smiles
+    #     if smi in self.train_mols_map:
+    #         return self.train_mols_map[smi].reward
+    #     return self.r2r(normscore=self.rewarder(m))
 
-    def sample(self, n):
+    def _get_rewards(self, mdpmols):
+        # mols = [mol for mol in mdpmols]
+        rewards = [None]*len(mdpmols)
+        idx_of_calc = []
+        mols_to_calc = []
+        for i, mdpmol in enumerate(mdpmols):
+            smi = mdpmol.smiles
+            if smi in self.train_mols_map:
+                rewards[i] = self.train_mols_map[smi]
+            else:
+                idx_of_calc.append(i)
+                rdmol = mdpmol.mol
+                rdmol.SetProp("_Name", "dummy")
+                mols_to_calc.append(rdmol)
+        
+        calced_rewards = self.rewarder(mols_to_calc)
+        for i, reward in zip(idx_of_calc, calced_rewards):
+            rewards[i] = reward
+        rewards = [reward if reward is not None else self.R_min for reward in rewards]
+        return rewards
+
+    def sample(self, n, pool = None):
         if self.replay_mode == 'dataset':
             eidx = self.train_rng.randint(0, len(self.train_mols), n)
-            samples = sum((self._get(i, self.train_mols) for i in eidx), [])
+            to_sample_from = self.train_mols
+            # samples = sum((self._get(i, self.train_mols) for i in eidx), [])
         elif self.replay_mode == 'online':
             eidx = self.train_rng.randint(0, max(1,len(self.online_mols)), n)
-            samples = sum((self._get(i, self.online_mols) for i in eidx), [])
+            to_sample_from = self.online_mols
+        
         elif self.replay_mode == 'prioritized':
+            raise ValueError("reimplement me")
             if not len(self.online_mols):
                 # _get will sample from the model
                 samples = sum((self._get(0, self.online_mols) for i in range(n)), [])
@@ -250,6 +297,25 @@ class Dataset:
                 prio = np.float32([i[0] for i in self.online_mols])
                 eidx = self.train_rng.choice(len(self.online_mols), n, False, prio/prio.sum())
                 samples = sum((self._get(i, self.online_mols) for i in eidx), [])
+        # if pool is not None:
+        non_flat_samples = [self._get(i, to_sample_from) for i in eidx]
+        final_mols = [ele[-1][3].mol for ele in non_flat_samples]
+        final_mols = [Chem.AddHs(mol) for mol in final_mols]
+        
+        if pool is not None:
+            final_mols = pool.map(get_rdkit_coords, final_mols)
+        else:
+            final_mols = [get_rdkit_coords(mol) for mol in final_mols]
+        
+        for ele, finished_mol in zip(non_flat_samples, final_mols):
+            ele[-1][3]._mol = finished_mol
+        
+        samples = sum(non_flat_samples, [])
+        # else:
+        #     samples = sum((self._get(i, to_sample_from) for i in eidx), [])
+        
+        self.reward_in_batch(samples)
+        
         return zip(*samples)
 
     def sample2batch(self, mb):
@@ -370,8 +436,8 @@ def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=
     debug_no_threads = True
     # device = torch.device('cuda')
     # device = torch.device('cpu')
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(device)
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    print(f"gflow device: {device}")
 
     if num_steps is None:
         num_steps = args.num_iterations + 1
@@ -441,95 +507,96 @@ def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=
     max_blocks = args.max_blocks
     leaf_coef = args.leaf_coef
 
-    for i in range(num_steps):
-        if not debug_no_threads:
-            r = sampler()
-            for thread in dataset.sampler_threads:
-                if thread.failed:
-                    stop_everything()
-                    pdb.post_mortem(thread.exception.__traceback__)
-                    return
-            p, pb, a, r, s, d, mols = r
-        else:
-            p, pb, a, r, s, d, mols = dataset.sample2batch(dataset.sample(mbsize))
-        # Since we sampled 'mbsize' trajectories, we're going to get
-        # roughly mbsize * H (H is variable) transitions
-        ntransitions = r.shape[0]
-        # state outputs
-        if tau > 0:
-            with torch.no_grad():
-                stem_out_s, mol_out_s = target_model(s, None)
-        else:
-            stem_out_s, mol_out_s = model(s, None)
-        # parents of the state outputs
-        stem_out_p, mol_out_p = model(p, None)
-        # index parents by their corresponding actions
-        qsa_p = model.index_output_by_action(p, stem_out_p, mol_out_p[:, 0], a)
-        # then sum the parents' contribution, this is the inflow
-        exp_inflow = (torch.zeros((ntransitions,), device=device, dtype=dataset.floatX)
-                      .index_add_(0, pb, torch.exp(qsa_p))) # pb is the parents' batch index
-        inflow = torch.log(exp_inflow + log_reg_c)
-        # sum the state's Q(s,a), this is the outflow
-        exp_outflow = model.sum_output(s, torch.exp(stem_out_s), torch.exp(mol_out_s[:, 0]))
-        # include reward and done multiplier, then take the log
-        # we're guarenteed that r > 0 iff d = 1, so the log always works
-        outflow_plus_r = torch.log(log_reg_c + r + exp_outflow * (1-d))
-        if do_nblocks_reg:
-            losses = _losses = ((inflow - outflow_plus_r) / (s.nblocks * max_blocks)).pow(2)
-        else:
-            losses = _losses = (inflow - outflow_plus_r).pow(2)
-        if clip_loss > 0:
-            ld = losses.detach()
-            losses = losses / ld * torch.minimum(ld, clip_loss)
+    with multiprocessing.Pool(mbsize) as pool:
+        for i in range(num_steps):
+            if not debug_no_threads:
+                r = sampler()
+                for thread in dataset.sampler_threads:
+                    if thread.failed:
+                        stop_everything()
+                        pdb.post_mortem(thread.exception.__traceback__)
+                        return
+                p, pb, a, r, s, d, mols = r
+            else:
+                p, pb, a, r, s, d, mols = dataset.sample2batch(dataset.sample(mbsize, pool))
+            # Since we sampled 'mbsize' trajectories, we're going to get
+            # roughly mbsize * H (H is variable) transitions
+            ntransitions = r.shape[0]
+            # state outputs
+            if tau > 0:
+                with torch.no_grad():
+                    stem_out_s, mol_out_s = target_model(s, None)
+            else:
+                stem_out_s, mol_out_s = model(s, None)
+            # parents of the state outputs
+            stem_out_p, mol_out_p = model(p, None)
+            # index parents by their corresponding actions
+            qsa_p = model.index_output_by_action(p, stem_out_p, mol_out_p[:, 0], a)
+            # then sum the parents' contribution, this is the inflow
+            exp_inflow = (torch.zeros((ntransitions,), device=device, dtype=dataset.floatX)
+                        .index_add_(0, pb, torch.exp(qsa_p))) # pb is the parents' batch index
+            inflow = torch.log(exp_inflow + log_reg_c)
+            # sum the state's Q(s,a), this is the outflow
+            exp_outflow = model.sum_output(s, torch.exp(stem_out_s), torch.exp(mol_out_s[:, 0]))
+            # include reward and done multiplier, then take the log
+            # we're guarenteed that r > 0 iff d = 1, so the log always works
+            outflow_plus_r = torch.log(log_reg_c + r + exp_outflow * (1-d))
+            if do_nblocks_reg:
+                losses = _losses = ((inflow - outflow_plus_r) / (s.nblocks * max_blocks)).pow(2)
+            else:
+                losses = _losses = (inflow - outflow_plus_r).pow(2)
+            if clip_loss > 0:
+                ld = losses.detach()
+                losses = losses / ld * torch.minimum(ld, clip_loss)
 
-        term_loss = (losses * d).sum() / (d.sum() + 1e-20)
-        flow_loss = (losses * (1-d)).sum() / ((1-d).sum() + 1e-20)
-        if balanced_loss:
-            loss = term_loss * leaf_coef + flow_loss
-        else:
-            loss = losses.mean()
-        opt.zero_grad()
-        loss.backward(retain_graph=(not i % 50))
+            term_loss = (losses * d).sum() / (d.sum() + 1e-20)
+            flow_loss = (losses * (1-d)).sum() / ((1-d).sum() + 1e-20)
+            if balanced_loss:
+                loss = term_loss * leaf_coef + flow_loss
+            else:
+                loss = losses.mean()
+            opt.zero_grad()
+            loss.backward(retain_graph=(not i % 50))
 
-        _term_loss = (_losses * d).sum() / (d.sum() + 1e-20)
-        _flow_loss = (_losses * (1-d)).sum() / ((1-d).sum() + 1e-20)
-        last_losses.append((loss.item(), term_loss.item(), flow_loss.item()))
-        train_losses.append((loss.item(), _term_loss.item(), _flow_loss.item(),
-                             term_loss.item(), flow_loss.item()))
-        if not i % 50:
-            train_infos.append((
-                _term_loss.data.cpu().numpy(),
-                _flow_loss.data.cpu().numpy(),
-                exp_inflow.data.cpu().numpy(),
-                exp_outflow.data.cpu().numpy(),
-                r.data.cpu().numpy(),
-                mols[1],
-                [i.pow(2).sum().item() for i in model.parameters()],
-                torch.autograd.grad(loss, qsa_p, retain_graph=True)[0].data.cpu().numpy(),
-                torch.autograd.grad(loss, stem_out_s, retain_graph=True)[0].data.cpu().numpy(),
-                torch.autograd.grad(loss, stem_out_p, retain_graph=True)[0].data.cpu().numpy(),
-            ))
-        if args.clip_grad > 0:
-            torch.nn.utils.clip_grad_value_(model.parameters(),
-                                           args.clip_grad)
-        opt.step()
-        model.training_steps = i + 1
-        if tau > 0:
-            for _a,b in zip(model.parameters(), target_model.parameters()):
-                b.data.mul_(1-tau).add_(tau*_a)
+            _term_loss = (_losses * d).sum() / (d.sum() + 1e-20)
+            _flow_loss = (_losses * (1-d)).sum() / ((1-d).sum() + 1e-20)
+            last_losses.append((loss.item(), term_loss.item(), flow_loss.item()))
+            train_losses.append((loss.item(), _term_loss.item(), _flow_loss.item(),
+                                term_loss.item(), flow_loss.item()))
+            if not i % 50:
+                train_infos.append((
+                    _term_loss.data.cpu().numpy(),
+                    _flow_loss.data.cpu().numpy(),
+                    exp_inflow.data.cpu().numpy(),
+                    exp_outflow.data.cpu().numpy(),
+                    r.data.cpu().numpy(),
+                    mols[1],
+                    [i.pow(2).sum().item() for i in model.parameters()],
+                    torch.autograd.grad(loss, qsa_p, retain_graph=True)[0].data.cpu().numpy(),
+                    torch.autograd.grad(loss, stem_out_s, retain_graph=True)[0].data.cpu().numpy(),
+                    torch.autograd.grad(loss, stem_out_p, retain_graph=True)[0].data.cpu().numpy(),
+                ))
+            if args.clip_grad > 0:
+                torch.nn.utils.clip_grad_value_(model.parameters(),
+                                            args.clip_grad)
+            opt.step()
+            model.training_steps = i + 1
+            if tau > 0:
+                for _a,b in zip(model.parameters(), target_model.parameters()):
+                    b.data.mul_(1-tau).add_(tau*_a)
 
 
-        if not i % 100:
-            last_losses = [np.round(np.mean(i), 3) for i in zip(*last_losses)]
-            print(i, last_losses)
-            print('time:', time.time() - time_last_check)
-            time_last_check = time.time()
-            last_losses = []
+            if not i % 100:
+                last_losses = [np.round(np.mean(i), 3) for i in zip(*last_losses)]
+                print(i, last_losses)
+                print('time:', time.time() - time_last_check)
+                time_last_check = time.time()
+                last_losses = []
 
-            if not i % 1000 and do_save:
-                save_stuff()
+                if not i % 1000 and do_save:
+                    save_stuff()
 
-    stop_everything()
+    # stop_everything()
     if do_save:
         save_stuff()
     return model
@@ -539,7 +606,7 @@ def main(args):
     bpath = "data/blocks_PDB_105.json"
     # device = torch.device('cuda')
     # device = torch.device('cpu')
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
 
     if args.floatX == 'float32':
@@ -556,9 +623,19 @@ def main(args):
     model.to(args.floatX)
     model.to(device)
 
-    proxy = Proxy(args, bpath, device)
+    # proxy = Proxy(args, bpath, device)
+    # with tempfile.TemporaryDirectory() as tmpdir:
+    if True:
+        arglist = [
+            "-r", "/home/qzj517/POR-DD/data/raw_data/por_structures/3ES9_1_reduced.pdb",
+            # "-o", tmpdir,
+            "-o", "/home/qzj517/POR-DD/continuous_gnina",
+            "--device", f"cuda:{torch.cuda.device_count()-1}" if torch.cuda.is_available() else "cpu",
+            "--batch_size", f"{args.mbsize}",
+        ]
+        rewarder = equibind_reward.Rewarder(args.reward_type, arglist)
+        train_model_with_proxy(args, model, rewarder, dataset, do_save=True)
 
-    train_model_with_proxy(args, model, proxy, dataset, do_save=True)
     print('Done.')
 
 
@@ -639,13 +716,14 @@ if __name__ == '__main__':
         _stop[0]()
         raise e
   else:
-      try:
-          main(args)
-      except KeyboardInterrupt as e:
-          print("stopping for", e)
-          _stop[0]()
-          raise e
-      except Exception as e:
-          print("exception", e)
-          _stop[0]()
-          raise e
+      main(args)
+    #   try:
+    #       main(args)
+    #   except KeyboardInterrupt as e:
+    #       print("stopping for", e)
+    #       _stop[0]()
+    #       raise e
+    #   except Exception as e:
+    #       print("exception", e)
+    #       _stop[0]()
+    #       raise e
