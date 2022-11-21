@@ -201,12 +201,12 @@ class MolMDPExtended(MolMDP):
         self.max_num_atm = max(self.block_natm)
         # see model_block.mol2graph
         self.true_block_set = sorted(set(self.block_smi))
-        # self.stem_type_offset = np.int32([0] + list(np.cumsum([
-        #     max(self.block_rs[self.block_smi.index(i)])+1 for i in self.true_block_set])))
-        block_rs = np.array(self.block_rs)
-        block_smi = np.array(self.block_smi)
-        self.stem_type_offset = np.cumsum([0] + [max(sum(block_rs[block_smi == smi_set], [])) + 1 
-                                for smi_set in self.true_block_set])
+        self.stem_type_offset = np.int32([0] + list(np.cumsum([
+            max(self.block_rs[self.block_smi.index(i)])+1 for i in self.true_block_set])))
+        # block_rs = np.array(self.block_rs)
+        # block_smi = np.array(self.block_smi)
+        # self.stem_type_offset = np.cumsum([0] + [max(sum(block_rs[block_smi == smi_set], [])) + 1 
+        #                         for smi_set in self.true_block_set])
         self.num_stem_types = self.stem_type_offset[-1]
         self.true_blockidx = [self.true_block_set.index(i) for i in self.block_smi]
         self.num_true_blocks = len(self.true_block_set)

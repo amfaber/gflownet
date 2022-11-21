@@ -624,12 +624,12 @@ def main(args):
     model.to(device)
 
     # proxy = Proxy(args, bpath, device)
-    # with tempfile.TemporaryDirectory() as tmpdir:
-    if True:
+    with tempfile.TemporaryDirectory() as tmpdir:
+    # if True:
         arglist = [
-            "-r", "/home/qzj517/POR-DD/data/raw_data/por_structures/3ES9_1_reduced.pdb",
-            # "-o", tmpdir,
-            "-o", "/home/qzj517/POR-DD/continuous_gnina",
+            "-r", "/home/qzj517/POR-DD/data/raw_data/por_structures/3QE2_1_reduced.pdb",
+            "-o", tmpdir,
+            # "-o", "/home/qzj517/POR-DD/continuous_gnina",
             "--device", f"cuda:{torch.cuda.device_count()-1}" if torch.cuda.is_available() else "cpu",
             "--batch_size", f"{args.mbsize}",
         ]
