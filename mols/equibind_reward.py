@@ -190,7 +190,7 @@ class Rewarder:
         prop_names = {"affinity": "CNNaffinity", "vs": "CNN_VS"}
         if not self.reward_type in prop_names:
             raise ValueError("Unknown reward_type")
-        rewards = [float(mol.GetProp(prop_names[self.reward_type])) + self.lipinski_score(mol) if mol is not None else None for mol in mols]
+        rewards = [max(float(mol.GetProp(prop_names[self.reward_type])) + self.lipinski_score(mol), 0) if mol is not None else None for mol in mols]
         # if self.reward_type == "affinity":
         #     rewards = [float(mol.GetProp("CNNaffinity")) + self.lipinski_score(mol) if mol is not None else None for mol in mols]
         # elif self.reward_type == "vs":
